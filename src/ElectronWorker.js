@@ -1,6 +1,6 @@
 
 import { EventEmitter } from 'events';
-import childProcess from 'child_process';
+import { spawn, execFile } from 'child_process';
 import cluster from 'cluster';
 import http from 'http';
 import debugPkg from 'debug';
@@ -206,7 +206,6 @@ class ElectronWorker extends EventEmitter {
 
       // we send host and port as env vars to child process in server mode
       if (connectionMode === 'server') {
-        childOpts.stdio = 'pipe';
         childOpts.env[hostEnvVarName] = host;
         childOpts.env[portEnvVarName] = port;
       } else if (connectionMode === 'ipc') {
@@ -219,7 +218,17 @@ class ElectronWorker extends EventEmitter {
 
       debugWorker(`spawning process for worker [${this.id}] with args:`, childArgs, 'and options:', childOpts);
 
-      this._childProcess = childProcess.spawn(pathToElectron, childArgs, childOpts);
+      if (connectionMode === 'server' && !childOpts.stdio) {
+        this._childProcess = execFile(pathToElectron, childArgs, childOpts, (error, stdout, stderr) => {
+          debugWorker(`worker [${this.id}] electron stdout: '${stdout}', stderr: '${stderr}'`);
+          if (error) {
+            return this.onWorkerProcessError(error);
+          }
+          return this.onWorkerProcessExitTryToRecyle();
+        });
+      } else {  // ipc mode or custom stdio
+        this._childProcess = spawn(pathToElectron, childArgs, childOpts);
+      }
 
       // ipc connection is required for ipc mode
       if (connectionMode === 'ipc' && !this._childProcess.send) {
@@ -243,9 +252,10 @@ class ElectronWorker extends EventEmitter {
 
       this._childProcess.once('error', this._handleSpawnError);
 
-      this._childProcess.on('error', this.onWorkerProcessError);
-
-      this._childProcess.on('exit', this.onWorkerProcessExitTryToRecyle);
+      if (connectionMode !== 'server' || childOpts.stdio) {
+        this._childProcess.on('error', this.onWorkerProcessError);
+        this._childProcess.on('exit', this.onWorkerProcessExitTryToRecyle);
+      }
 
       if (connectionMode === 'ipc') {
         this._childProcess.on('message', this.onWorkerProcessIpcMessage);
